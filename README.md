@@ -77,7 +77,7 @@ Proyek ini telah direstrukturisasi untuk meningkatkan keterbacaan dan kemudahan 
     ```
 2.  **Masuk ke direktori proyek:**
     ```bash
-    cd gemini-bot
+    cd bobotku
     ```
 3.  **Install dependensi:**
     ```bash
