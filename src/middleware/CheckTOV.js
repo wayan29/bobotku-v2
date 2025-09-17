@@ -4,6 +4,8 @@ const envConfig = require('dotenv').config({ path: dotenvPath }).parsed;
 const axios = require('axios');
 const crypto = require('crypto');
 const TokoV = require('../models/tov');
+const TransactionLog = require('../models/transactionLog');
+const { numberWithCommas } = require('../services/http_toko');
 
 if (!envConfig) {
     throw new Error(`Failed to load .env file from ${dotenvPath}`);
@@ -22,6 +24,69 @@ if (missingEnvVars.length > 0) {
         signature: envConfig.signature
     });
     throw new Error('Missing required environment variables: ' + missingEnvVars.join(', '));
+}
+
+// Function to create transaction log (upsert to avoid duplicates)
+async function createTransactionLog(transactionData, user, source = "bot") {
+    try {
+        // Parse timestamp
+        const timestamp = new Date();
+        
+        // Extract data from transaction
+        const {
+            status,
+            message,
+            sn,
+            ref_id,
+            trx_id,
+            produk,
+            sisa_saldo,
+            price
+        } = transactionData;
+        
+        // Load existing (to preserve category/brand fields)
+        const existing = await TransactionLog.findOne({ id: ref_id }).lean().exec();
+
+        // Create transaction log in new format
+        const logData = {
+            id: ref_id,
+            productName: produk || "Unknown Product",
+            details: `${ref_id} (${message})`,
+            costPrice: price || 0, // TOV doesn't provide cost price, using selling price
+            sellingPrice: price || 0,
+            status: status,
+            timestamp: timestamp,
+            buyerSkuCode: produk || "Unknown Product",
+            originalCustomerNo: ref_id,
+            productCategoryFromProvider: existing?.productCategoryFromProvider || "Unknown Category",
+            productBrandFromProvider: existing?.productBrandFromProvider || "Unknown Brand",
+            provider: "tokovoucher",
+            transactedBy: user,
+            source: source,
+            categoryKey: existing?.categoryKey || "Unknown Category",
+            iconName: existing?.iconName || "Unknown Brand",
+            providerTransactionId: trx_id,
+            transactionYear: timestamp.getFullYear(),
+            transactionMonth: timestamp.getMonth() + 1,
+            transactionDayOfMonth: timestamp.getDate(),
+            transactionDayOfWeek: timestamp.getDay(),
+            transactionHour: timestamp.getHours(),
+            failureReason: status === "Gagal" ? message : null,
+            serialNumber: sn || null
+        };
+        
+        // Upsert into transaction log collection to prevent duplicate key errors
+        const updated = await TransactionLog.findOneAndUpdate(
+            { id: ref_id },
+            { $set: logData },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+        return updated;
+    } catch (error) {
+        console.warn("TransactionLog upsert warning:", error?.message || error);
+        // Don't throw error to avoid breaking main flow
+        return null;
+    }
 }
 
 const tov = {
@@ -94,7 +159,8 @@ const tov = {
 };
 
 const checkStatus = async (ctx, next) => {
-    const tovCheckMatch = ctx?.message?.text?.match(/^\/tovcheck\s+(.+)/);
+    // Dukung cek status via "/tov <ref_id>" (baru) dan "/tovcheck <ref_id>" (alias lama)
+    const tovCheckMatch = ctx?.message?.text?.match(/^\/(?:tov|tovcheck)\s+(.+)/);
     
     if (!tovCheckMatch) {
         return next();
@@ -106,10 +172,10 @@ const checkStatus = async (ctx, next) => {
         return ctx.replyWithHTML(`❌ <b>FORMAT SALAH</b>
 
 📝 <b>Cara penggunaan:</b>
-<code>/tovcheck [ref_id]</code>
+<code>/tov [ref_id]</code>
 
 💡 <b>Contoh:</b>
-<code>/tovcheck TOV123456789</code>`);
+<code>/tov TOV123456789</code>`);
     }
 
     await ctx.replyWithHTML(`⏳ <b>MENGECEK STATUS TRANSAKSI</b>
@@ -119,6 +185,25 @@ const checkStatus = async (ctx, next) => {
 📡 <i>Mohon tunggu sebentar...</i>`);
 
     try {
+        // If DB unified, detect provider from TransactionLog and redirect if needed
+        try {
+            const tlog = await TransactionLog.findOne({ id: refIdNumber }).lean().exec();
+            if (tlog && tlog.provider === 'digiflazz') {
+                const { checkTransactionStatus } = require('./Digiflazz');
+                const data = await checkTransactionStatus(refIdNumber);
+                let statusEmoji, statusText, statusColor;
+                switch ((data.status||'').toLowerCase()) {
+                    case 'sukses': statusEmoji='✅'; statusColor='🟢'; statusText='SUKSES'; break;
+                    case 'pending': statusEmoji='⏳'; statusColor='🟡'; statusText='PENDING'; break;
+                    case 'gagal': statusEmoji='❌'; statusColor='🔴'; statusText='GAGAL'; break;
+                    default: statusEmoji='❓'; statusColor='⚪'; statusText=(data.status||'UNKNOWN').toUpperCase();
+                }
+                const msg = `${statusEmoji} <b>STATUS TRANSAKSI (Digiflazz)</b>\n\n${statusColor} Status: <b>${statusText}</b>\n🆔 Ref ID: <code>${data.ref_id||refIdNumber}</code>${data.sn?`\n🎮 SN:\n<code>${data.sn}</code>`:''}${data.message?`\n\n📝 Pesan:\n<i>${data.message}</i>`:''}`;
+                await ctx.replyWithHTML(msg);
+                return;
+            }
+        } catch{}
+
         const data = await tov.checkTransactionStatus(refIdNumber);
         
         let statusEmoji, statusText, statusColor;
@@ -155,8 +240,8 @@ ${statusColor} Status: <b>${statusText}</b>
 🆔 Ref ID: <code>${data.ref_id}</code>
 🔢 Trx ID: <code>${data.trx_id}</code>
 
-${data.sn ? `🎮 Serial Number:\n<code>${data.sn}</code>\n\n` : ''}${data.message ? `📝 Pesan:\n<i>${data.message}</i>\n\n` : ''}💰 Harga: Rp ${data.price ? Number(data.price).toLocaleString('id-ID') : 'N/A'}
-💳 Saldo: Rp ${data.sisa_saldo ? Number(data.sisa_saldo).toLocaleString('id-ID') : 'N/A'}
+${data.sn ? `🎮 Serial Number:\n<code>${data.sn}</code>\n\n` : ''}${data.message ? `📝 Pesan:\n<i>${data.message}</i>\n\n` : ''}💰 Harga: Rp ${data.price ? numberWithCommas(Number(data.price)) : 'N/A'}
+💳 Saldo: Rp ${data.sisa_saldo ? numberWithCommas(Number(data.sisa_saldo)) : 'N/A'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⏰ <i>${new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })}</i>
@@ -170,6 +255,10 @@ ${data.sn ? `🎮 Serial Number:\n<code>${data.sn}</code>\n\n` : ''}${data.messa
                 { status: data.status, sn: data.sn },
                 { new: true }
             );
+            
+            // Create transaction log in new format for all status updates
+        const username = ctx.message.from.username || ctx.message.from.id.toString();
+        await createTransactionLog(data, username, "bot");
         }
     } catch (error) {
         const now = new Date();
@@ -210,8 +299,8 @@ ${reason}
 • Hubungi admin jika berlanjut
 
 ℹ️ <b>Bantuan:</b>
-• Format: <code>/tovcheck [ref_id]</code>
-• Contoh: <code>/tovcheck TOV123456789</code>
+• Format: <code>/tov [ref_id]</code>
+• Contoh: <code>/tov TOV123456789</code>
 
 ⏰ <i>Error Time: ${errorTime}</i>`;
 
@@ -220,9 +309,10 @@ ${reason}
 };
 
 const GetAll = async (ctx, next) => {
+    // List transaksi hanya jika persis "/tov" tanpa argumen
     if (ctx?.message?.text === '/tov') {
         try {
-            const data = await TokoV.find().sort({ createdAt: -1 });
+            const data = await TransactionLog.find({ provider: 'tokovoucher' }).sort({ timestamp: -1 });
             
             if (data.length === 0) {
                 return ctx.replyWithHTML(`🏪 <b>DAFTAR TRANSAKSI</b>
@@ -230,27 +320,27 @@ const GetAll = async (ctx, next) => {
 ❌ <i>Tidak ada transaksi yang ditemukan</i>
 
 💡 <b>Tips:</b>
-• Gunakan /tovcheck untuk cek status transaksi
-• Format: /tovcheck [ref_id]`);
+• Gunakan /tov [ref_id] untuk cek status transaksi
+• Format: /tov [ref_id]`);
             }
 
             let message = `🏪 <b>DAFTAR TRANSAKSI TERAKHIR</b>\n\n`;
             
-            data.slice(0, 5).forEach((trx, index) => {
+            data.slice(0, 10).forEach((trx, index) => {
                 const status = {
                     'sukses': '✅',
                     'pending': '⏳',
                     'gagal': '❌'
                 }[trx.status?.toLowerCase()] || '❓';
 
-                message += `${status} <b>${trx.status?.toUpperCase()}</b>\n`;
-                message += `🆔 Ref ID: <code>${trx.ref_id}</code>\n`;
-                if (trx.sn) message += `🎮 SN: <code>${trx.sn}</code>\n`;
+                message += `${status} <b>${(trx.status||'-').toUpperCase()}</b>\n`;
+                message += `🆔 Ref ID: <code>${trx.id}</code>\n`;
+                if (trx.serialNumber) message += `🎮 SN: <code>${trx.serialNumber}</code>\n`;
                 message += `\n`;
             });
 
             message += `━━━━━━━━━━━━━━━━\n`;
-            message += `📝 Menampilkan 5 transaksi terakhir\n`;
+            message += `📝 Menampilkan 10 transaksi terakhir\n`;
             message += `⏰ <i>${new Date().toLocaleString('id-ID')}</i>`;
 
             return ctx.replyWithHTML(message);
@@ -263,5 +353,9 @@ const GetAll = async (ctx, next) => {
 
 module.exports = {
     checkStatus,
-    GetAll
+    GetAll,
+    // Export raw checker for reuse (e.g., /struk)
+    async checkTovStatus(refId) {
+        return tov.checkTransactionStatus(refId);
+    }
 };

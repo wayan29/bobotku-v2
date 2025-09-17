@@ -5,7 +5,8 @@ const userSchema = new mongoose.Schema({
     chatId: { type: String, required: true, unique: true },
     username: { type: String },
     isPremium: { type: Boolean, default: false },
-    
+}, {
+    collection: 'white_id'
 });
 
 

@@ -77,8 +77,10 @@ function checkOperator(phoneNumber) {
 }
 
 const checkOp = (ctx, next) => {
-    if (ctx.message.text.startsWith('/checkop')) {
-        const input = ctx.message.text.slice(8).trim();
+    const text = ctx.message?.text || '';
+    const match = text.match(/^\/(op|checkop)(?:\s+(.*))?$/);
+    if (match) {
+        const input = (match[2] || '').trim();
         
         // Jika tidak ada input, tampilkan panduan
         if (input === "") {
@@ -88,12 +90,12 @@ const checkOp = (ctx, next) => {
 ❌ <b>Format Salah!</b>
 
 📝 <b>Cara Penggunaan:</b>
-<code>/checkop [nomor_hp]</code>
+<code>/op [nomor_hp]</code>
 
 💡 <b>Contoh:</b>
-• <code>/checkop 081234567890</code>
-• <code>/checkop +6281234567890</code>
-• <code>/checkop 6281234567890</code>
+• <code>/op 081234567890</code>
+• <code>/op +6281234567890</code>
+• <code>/op 6281234567890</code>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🏢 <b>Operator yang Didukung:</b>
@@ -128,7 +130,7 @@ const checkOp = (ctx, next) => {
 ✨ <i>Deteksi berhasil dilakukan!</i>
 ⏰ <i>Waktu: ${new Date().toLocaleString('id-ID')}</i>
 
-💡 <i>Gunakan /checkop [nomor] untuk cek nomor lain</i>
+💡 <i>Gunakan /op [nomor] untuk cek nomor lain</i>
                 `;
                 ctx.replyWithHTML(successMessage);
             } else {
@@ -176,7 +178,7 @@ const checkOp = (ctx, next) => {
 • Hubungi admin jika masalah berlanjut
 
 📝 <b>Format yang Benar:</b>
-<code>/checkop 081234567890</code>
+<code>/op 081234567890</code>
 
 ⏰ <i>Error Time: ${new Date().toLocaleString('id-ID')}</i>
             `;

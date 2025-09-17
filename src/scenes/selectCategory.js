@@ -21,24 +21,29 @@ botMenu.enter(async (ctx) => {
 
     if (selectedBot === 'Digiflazz') {
         try {
-            listdigiflazz = await getListProductDigi();
+            // Always force refresh when Digiflazz is selected
+            listdigiflazz = await getListProductDigi(true);
             if (listdigiflazz.length === 0) {
                 await ctx.reply('⚠️ Tidak dapat mengambil data kategori produk. Silakan coba beberapa saat lagi.');
                 return ctx.scene.enter(SCENE_KEYS.BOT);
             }
-            saldoText = `💰 Saldo Anda: Rp ${numberWithCommas(await checkSaldoDigi())}\n\n`;
-            listText = "🗂️ *Silakan Pilih Kategori:*\n\n" + listdigiflazz.map((item, index) => `${index + 1}. ${item}`).join('\n');
+            saldoText = `💰 <b>Saldo</b>: Rp ${numberWithCommas(await checkSaldoDigi())}\n\n`;
+            listText = `📂 <b>Pilih Kategori</b>\n\n` + listdigiflazz
+                .map((item, index) => `${(index + 1).toString().padStart(2,'0')}. ${item}`)
+                .join('\n');
         } catch (error) {
             await ctx.reply(`❌ ${error.message}`);
             return ctx.scene.enter(SCENE_KEYS.BOT);
         }
     } else if (selectedBot === 'TokoVoucher') {
         listTokoVoucher = await getKategori();
-        saldoText = `💰 Saldo Anda: Rp ${numberWithCommas(await checkSaldo())}\n\n`;
-        listText = "🗂️ *Silakan Pilih Kategori:*\n\n" + listTokoVoucher.map((item, index) => `${index + 1}. ${item.nama}`).join('\n');
+        saldoText = `💰 <b>Saldo</b>: Rp ${numberWithCommas(await checkSaldo())}\n\n`;
+        listText = `📂 <b>Pilih Kategori</b>\n\n` + listTokoVoucher
+            .map((item, index) => `${(index + 1).toString().padStart(2,'0')}. ${item.nama}`)
+            .join('\n');
     }
     
-    await ctx.replyWithMarkdown(saldoText + listText, showKeyboardChunk(['⬅️ Kembali']));
+    await ctx.replyWithHTML(saldoText + listText, showKeyboardChunk(['⬅️ Kembali']));
 
 });
 
@@ -58,10 +63,10 @@ botMenu.on('text', async (ctx) => {
                 ctx.session.selectedCategory = listdigiflazz[selectedIndex];
                 ctx.scene.enter(SCENE_KEYS.BRAND);
             } else {
-                return ctx.reply('Maaf, pilihan kategori tidak tersedia. Silakan pilih nomor yang valid.');
+                return ctx.reply('❌ Pilihan tidak tersedia. Silakan pilih nomor yang valid.');
             }
         } else {
-            return ctx.reply('Maaf, input harus berupa nomor. Silakan pilih nomor kategori.');
+            return ctx.reply('❗ Input harus berupa nomor. Silakan pilih nomor kategori.');
         }
     } else if (selectedBot === 'TokoVoucher') {
         if (!isNaN(selectedCategory)) {
@@ -70,10 +75,10 @@ botMenu.on('text', async (ctx) => {
                 ctx.session.selectedCategory = listTokoVoucher[selectedIndex];
                 ctx.scene.enter(SCENE_KEYS.BRAND);
             } else {
-               return ctx.reply('Maaf, pilihan kategori tidak tersedia. Silakan pilih nomor yang valid.');
+               return ctx.reply('❌ Pilihan tidak tersedia. Silakan pilih nomor yang valid.');
            }
        } else {
-         return ctx.reply('Maaf, input harus berupa nomor. Silakan pilih nomor kategori.');
+         return ctx.reply('❗ Input harus berupa nomor. Silakan pilih nomor kategori.');
         }
     }
 });

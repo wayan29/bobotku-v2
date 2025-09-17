@@ -1,6 +1,6 @@
 const telegraf = require('telegraf');
 const SCENE_KEYS = require('../constants/sceneKeys');
-const { showKeyboardChunk } = require('../services/keyboard');
+const { showKeyboardChunk, splitList } = require('../services/keyboard');
 const { getProductList, numberWithCommas } = require('../services/http');
 const { getJenis } = require('../services/http_toko');
 
@@ -17,34 +17,40 @@ botMenu.enter(async (ctx) => {
     if (BOT === 'Digiflazz') {
         List = await getProductList(category, brand);
         
-        listText = `╔══ � *DAFTAR PRODUK* 📱 ══╗\n`;
-        listText += `║ ${brand.toUpperCase()}\n`;
-        listText += `╟────────────────────╢\n`;
-        
-        List.forEach((item, index) => {
-            const num = (index + 1).toString().padStart(2, '0');
-            listText += `║\n`;
-            listText += `║ ${num}. ${item.product_name}\n`;
-            listText += `║    💰 Rp ${numberWithCommas(item.price)}\n`;
-            
-            // Add stock status with emoji
-            const stockStatus = item.seller_product_status && item.buyer_product_status;
-            listText += `║    ${stockStatus ? '✅ Tersedia' : '❌ Tidak Tersedia'}\n`;
-        });
-        
-        listText += `║\n`;
-        listText += `╚═════════════════════╝\n\n`;
-        listText += `📝 *Ketik nomor untuk memilih produk*`;
+        const chunkSize = 8; // compact chunks for mobile
+        const chunks = splitList(List, chunkSize);
+        for (let i = 0; i < chunks.length; i++) {
+            let block = `📦 <b>Produk ${brand.toUpperCase()}</b>\n\n`;
+            chunks[i].forEach((item, idx) => {
+                const num = (i * chunkSize + idx + 1).toString().padStart(2, '0');
+                const stock = item.seller_product_status && item.buyer_product_status ? '✅' : '❌';
+                block += `${num}. ${item.product_name}\n`;
+                block += `   ${stock} Rp ${numberWithCommas(item.price)}\n`;
+            });
+            block += `\n📝 Ketik nomor untuk memilih`;
+            await ctx.replyWithHTML(block, showKeyboardChunk(['⬅️ Kembali']));
+        }
+        return;
     } else if (BOT === 'TokoVoucher') {
         const id_operator = brand.id;
         ctx.session.id_operator = id_operator;
         const listJenis = await getJenis(id_operator);
         ctx.session.list = listJenis;
-        listText = `📦 *Silakan Pilih Produk:*
-
-` + listJenis.map((item, index) => `${index + 1}. ${item.nama}`).join('\n');
+        const chunkSize = 10;
+        const chunks = splitList(listJenis, chunkSize);
+        for (let i = 0; i < chunks.length; i++) {
+            let block = `📦 <b>Pilih Produk</b>\n\n`;
+            chunks[i].forEach((item, idx) => {
+                const num = (i * chunkSize + idx + 1).toString().padStart(2, '0');
+                block += `${num}. ${item.nama}\n`;
+            });
+            block += `\n📝 Ketik nomor untuk memilih`;
+            await ctx.replyWithHTML(block, showKeyboardChunk(['⬅️ Kembali']));
+        }
+        return;
     }
-      await ctx.replyWithMarkdown(listText, showKeyboardChunk(['⬅️ Kembali']));
+      // fallback
+      await ctx.replyWithHTML(listText, showKeyboardChunk(['⬅️ Kembali']));
 });
 
 botMenu.on('text', (ctx) => {

@@ -14,19 +14,21 @@ botMenu.enter(async (ctx) => {
     if (BOT === 'Digiflazz') {
         listBrand = await getListBrand(selectedCategory);
         
-        let listText = "📱 *Silakan Pilih Brand:*\n\n";
-        listText += listBrand.map((item, index) => `${index + 1}. ${item}`).join('\n');
+        const listText = `🏷️ <b>Pilih Brand</b>\n\n` + listBrand
+            .map((item, index) => `${(index + 1).toString().padStart(2,'0')}. ${item}`)
+            .join('\n');
         
-        await ctx.replyWithMarkdown(listText, showKeyboardChunk(['⬅️ Kembali']));
+        await ctx.replyWithHTML(listText, showKeyboardChunk(['⬅️ Kembali']));
 
     } else if (BOT === 'TokoVoucher') {
         const id_category = selectedCategory.id;
         listBrand = await getOperatorByCategory(id_category);
        
-        let listText = "📱 *Silakan Pilih Brand:*\n\n";
-        listText += listBrand.map((item, index) => `${index + 1}. ${item.nama}`).join('\n');
+        const listText = `🏷️ <b>Pilih Brand</b>\n\n` + listBrand
+            .map((item, index) => `${(index + 1).toString().padStart(2,'0')}. ${item.nama}`)
+            .join('\n');
 
-        await ctx.replyWithMarkdown(listText, showKeyboardChunk(['⬅️ Kembali']));
+        await ctx.replyWithHTML(listText, showKeyboardChunk(['⬅️ Kembali']));
     }
 });
 

@@ -1,6 +1,8 @@
 const axios = require('axios');
 require('dotenv').config();
 
+const { generateRefId } = require('../utils/refid');
+
 const tokoVoucher = {
   memberCode: process.env.member_code,
   signature: process.env.signature,
@@ -157,10 +159,11 @@ const tokoVoucher = {
      * Generates a unique reference ID.
      * @returns {string}
      */
-    function getRefId() {
-        return `REF${Date.now()}WAYAN`;
+    async function getRefId() {
+        // Format: TV<YYYYMMDDHHMMSS><NNN>
+        return generateRefId('TV');
     }
-    /**
+    /** 
      * Creates a transaction with TokoVoucher API.
      * @param {string} refId
      * @param {string} productCode

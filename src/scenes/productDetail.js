@@ -1,6 +1,6 @@
 const telegraf = require('telegraf');
 const SCENE_KEYS = require('../constants/sceneKeys');
-const { handleDigiflazzEnter, handleDigiflazzMessage } = require('./providers/digiflazz');
+const { handleDigiflazzEnter, handleDigiflazzMessage, handleDigiflazzPinAction } = require('./providers/digiflazz');
 const { handleTokoVoucherEnter, handleTokoVoucherMessage } = require('./providers/tokovoucher');
 
 const botMenu = new telegraf.Scenes.BaseScene(SCENE_KEYS.PRICE);
@@ -30,6 +30,17 @@ botMenu.on('text', async (ctx) => {
         await handleDigiflazzMessage(ctx, pesan);
     } else if (BOT === 'TokoVoucher') {
         await handleTokoVoucherMessage(ctx, pesan);
+    }
+});
+
+// Handle inline keypad callbacks for PIN (Digiflazz)
+botMenu.action(/^pin:(.+)$/, async (ctx) => {
+    const data = ctx.match[1];
+    const BOT = ctx.session.selectedBot;
+    if (BOT === 'Digiflazz') {
+        await handleDigiflazzPinAction(ctx, data);
+    } else {
+        await ctx.answerCbQuery();
     }
 });
 

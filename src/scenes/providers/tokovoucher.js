@@ -3,6 +3,20 @@ const { numberWithCommas } = require('../../utils/formatters');
 const { getListJenis } = require('../../services/http_toko');
 const SCENE_KEYS = require('../../constants/sceneKeys');
 
+const escapeHtml = (value = '') => String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const formatCurrency = (amount) => {
+    if (amount === null || amount === undefined || amount === '') return '0';
+    const numeric = Number(amount);
+    if (Number.isNaN(numeric)) return '0';
+    return numberWithCommas(numeric);
+};
+
 const handleTokoVoucherEnter = async (ctx, selectedProduct) => {
     const id_jenis = selectedProduct.id;
     const listJenis = await getListJenis(id_jenis);
@@ -11,20 +25,21 @@ const handleTokoVoucherEnter = async (ctx, selectedProduct) => {
     const chunkSize = 10; // Reduced for better mobile display
     const chunks = splitList(listJenis, chunkSize);
     for (let i = 0; i < chunks.length; i++) {
-        let listChunk = `╔══ 🛒 *DAFTAR PRODUK* 🛒 ══╗\n`;
-        listChunk += `║\n`;
-        
-        chunks[i].forEach((item, index) => {
-            const num = (i * chunkSize + index + 1).toString().padStart(2, '0');
-            listChunk += `║ ${num}. ${item.nama_produk}\n`;
-            listChunk += `║     💰 Rp ${numberWithCommas(item.price)}\n`;
-            listChunk += `║\n`;
-        });
-        
-        listChunk += `╚═════════════════════╝\n\n`;
-        listChunk += `📝 *Ketik nomor untuk memilih produk*`;
-        
-        await ctx.replyWithMarkdown(listChunk, showKeyboardChunk(['⬅️ Kembali']));
+        const chunk = chunks[i];
+        const startIndex = i * chunkSize;
+        const header = chunks.length > 1
+            ? `📦 <b>Daftar Produk</b> — Halaman ${i + 1}/${chunks.length}`
+            : `📦 <b>Daftar Produk</b>`;
+
+        const itemsText = chunk.map((item, index) => {
+            const num = (startIndex + index + 1).toString().padStart(2, '0');
+            const status = item.status ? '✅' : '⚠️';
+            const price = formatCurrency(item.price);
+            return `${num}. ${status} <b>${escapeHtml(item.nama_produk)}</b>\nRp ${price}`;
+        }).join('\n\n');
+
+        const footer = `\n\n📝 Ketik nomor untuk memilih produk`;
+        await ctx.replyWithHTML(`${header}\n\n${itemsText}${footer}`, showKeyboardChunk(['⬅️ Kembali']));
     }
 };
 

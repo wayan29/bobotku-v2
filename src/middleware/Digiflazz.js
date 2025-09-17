@@ -1,5 +1,6 @@
 // req models
 const DigiModels = require("../models/trxdigi");
+const TransactionLog = require("../models/transactionLog");
 const axios = require('axios');
 const crypto = require('crypto');
 
@@ -8,15 +9,23 @@ async function checkTransactionStatus(RefID) {
     const kunci = process.env.apikey;
     const endpoint = 'https://api.digiflazz.com/v1/transaction';
 
-    // find data by RefID from database
-    const data = await DigiModels.findOne({ ref_id: RefID });
-    if (!data) {
-        throw new Error('Ref ID tidak ditemukan');
-    }
+    // find data by RefID from DigiModels or fallback to TransactionLog
+    let data = await DigiModels.findOne({ ref_id: RefID });
+    let ref_id_number = RefID;
+    let customer_no;
+    let buyer_sku_code;
 
-    const ref_id_number = data.ref_id;
-    const customer_no = data.customer_no;
-    const buyer_sku_code = data.buyer_sku_code;
+    if (!data) {
+        const tlog = await TransactionLog.findOne({ id: RefID, provider: 'digiflazz' }).lean().exec();
+        if (!tlog) {
+            throw new Error('Ref ID tidak ditemukan');
+        }
+        customer_no = tlog.originalCustomerNo;
+        buyer_sku_code = tlog.buyerSkuCode;
+    } else {
+        customer_no = data.customer_no;
+        buyer_sku_code = data.buyer_sku_code;
+    }
 
     const sign = crypto
         .createHash('md5')
@@ -87,9 +96,74 @@ async function checkTransactionStatus(RefID) {
     }
 }
 
+// Function to upsert transaction log into unified transactions_log
+async function createTransactionLog(transactionData, user, source = "bot") {
+    try {
+        const timestamp = new Date();
+        const {
+            ref_id,
+            customer_no,
+            buyer_sku_code,
+            message,
+            status,
+            rc,
+            sn,
+            buyer_last_saldo,
+            price,
+            tele,
+            wa,
+            product_name,
+            category,
+            brand,
+            cost_price
+        } = transactionData;
+
+        const existing = await TransactionLog.findOne({ id: ref_id }).lean().exec();
+
+        const logData = {
+            id: ref_id,
+            productName: product_name || existing?.productName || "Unknown Product",
+            details: `${customer_no || existing?.originalCustomerNo || '-'} (${message})`,
+            costPrice: cost_price || existing?.costPrice || 0,
+            sellingPrice: typeof price === 'number' ? price : (existing?.sellingPrice || 0),
+            status: status,
+            timestamp: timestamp,
+            buyerSkuCode: buyer_sku_code || existing?.buyerSkuCode,
+            originalCustomerNo: customer_no || existing?.originalCustomerNo,
+            productCategoryFromProvider: category || existing?.productCategoryFromProvider || "Unknown Category",
+            productBrandFromProvider: brand || existing?.productBrandFromProvider || "Unknown Brand",
+            provider: "digiflazz",
+            transactedBy: user,
+            source: source,
+            categoryKey: category || existing?.categoryKey || "Unknown Category",
+            iconName: brand || existing?.iconName || "Unknown Brand",
+            providerTransactionId: rc || existing?.providerTransactionId || null,
+            transactionYear: timestamp.getFullYear(),
+            transactionMonth: timestamp.getMonth() + 1,
+            transactionDayOfMonth: timestamp.getDate(),
+            transactionDayOfWeek: timestamp.getDay(),
+            transactionHour: timestamp.getHours(),
+            failureReason: status === "Gagal" ? message : null,
+            serialNumber: sn || existing?.serialNumber || null
+        };
+
+        const updated = await TransactionLog.findOneAndUpdate(
+            { id: ref_id },
+            { $set: logData },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+        return updated;
+    } catch (error) {
+        console.warn("Error upserting Digiflazz transaction log:", error?.message || error);
+        return null;
+    }
+}
+
 const getAllDigiflazz = async (ctx, next) => {
-    if (ctx.message.text.startsWith('/digi')) {
-        const data = await DigiModels.find();
+    const text = ctx.message?.text;
+    // List transaksi: gunakan /dg (pendek) atau /digi (alias)
+    if (text === '/dg' || text === '/digi') {
+        const data = await TransactionLog.find({ provider: 'digiflazz' }).sort({ timestamp: -1 });
         
         if (data.length === 0) {
             const emptyMessage = `
@@ -98,7 +172,7 @@ const getAllDigiflazz = async (ctx, next) => {
 ❌ <i>Tidak ada transaksi yang ditemukan</i>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-💡 <i>Gunakan /digicheck [ref_id] untuk cek status</i>
+💡 <i>Gunakan /dg [ref_id] untuk cek status</i>
             `;
             ctx.replyWithHTML(emptyMessage);
             return;
@@ -117,19 +191,17 @@ const getAllDigiflazz = async (ctx, next) => {
 `;
         messages.push(headerMessage);
 
-        data.forEach((item) => {
-            const statusEmoji = item.status === 'Sukses' ? '✅' : 
-                               item.status === 'Pending' ? '⏳' : 
-                               item.status === 'Gagal' ? '❌' : '❓';
-            
-            messages.push(`${statusEmoji} <b>${no}.</b> <code>${item.ref_id}</code>`);
+        data.slice(0, 50).forEach((item) => {
+            const s = (item.status || '').toLowerCase();
+            const statusEmoji = s === 'sukses' ? '✅' : s === 'pending' ? '⏳' : s === 'gagal' ? '❌' : '❓';
+            messages.push(`${statusEmoji} <b>${no}.</b> <code>${item.id}</code> — ${item.productName || '-'}`);
             no++;
         });
 
         // Footer message
         const footerMessage = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-💡 <i>Gunakan /digicheck [ref_id] untuk cek detail</i>
+💡 <i>Gunakan /dg [ref_id] untuk cek detail</i>
         `;
 
         // Bagikan pesan menjadi beberapa bagian jika terlalu panjang
@@ -157,19 +229,46 @@ const getAllDigiflazz = async (ctx, next) => {
 
 // check digi
 const checkDigiflazz = async (ctx, next) => {
-    if (ctx.message.text.startsWith('/digicheck ')) {
-        // Ambil nomor pelanggan setelah /digicheck
-        const refIdNumber = ctx.message.text.slice(11).trim();
+    const text = ctx.message?.text || '';
+    // Cek status: dukung /dg <ref_id> (baru), /digi <ref_id> (alias), dan /digicheck <ref_id> (kompatibilitas lama)
+    let refIdNumber = null;
+    if (text.startsWith('/dg ')) {
+        refIdNumber = text.slice(4).trim();
+    } else if (text.startsWith('/digi ')) {
+        refIdNumber = text.slice(6).trim();
+    } else if (text.startsWith('/digicheck ')) {
+        refIdNumber = text.slice(11).trim();
+    }
+
+    if (refIdNumber !== null) {
+        // If DB unified, detect provider from TransactionLog and redirect if needed
+        try {
+            const tlog = await TransactionLog.findOne({ id: refIdNumber }).lean().exec();
+            if (tlog && tlog.provider === 'tokovoucher') {
+                await ctx.replyWithHTML(`ℹ️ <b>Ref ini milik TokoVoucher</b>\nMengalihkan pengecekan ke TokoVoucher...`);
+                const { checkTovStatus } = require('./CheckTOV');
+                const data = await checkTovStatus(refIdNumber);
+                const statusEmoji = data.status?.toLowerCase() === 'sukses' ? '✅' : data.status?.toLowerCase() === 'pending' ? '⏳' : '❌';
+                let msg = `${statusEmoji} <b>STATUS TRANSAKSI (TokoVoucher)</b>\n\n`+
+                          `🆔 <b>Ref ID:</b> <code>${data.ref_id}</code>\n`+
+                          `📊 <b>Status:</b> <b>${data.status}</b>\n`;
+                if (data.sn) msg += `🎫 <b>Serial Number:</b> <code>${data.sn}</code>\n`;
+                if (data.price) msg += `💰 <b>Harga:</b> Rp ${Number(data.price).toLocaleString('id-ID')}\n`;
+                if (data.message) msg += `📝 <b>Pesan:</b> <i>${data.message}</i>\n`;
+                await ctx.replyWithHTML(msg);
+                return;
+            }
+        } catch {}
         
         if (!refIdNumber) {
             const errorMessage = `
 ❌ <b>FORMAT SALAH</b>
 
 📝 <b>Cara penggunaan:</b>
-<code>/digicheck [ref_id]</code>
+<code>/dg [ref_id]</code>
 
 💡 <b>Contoh:</b>
-<code>/digicheck 123456789</code>
+<code>/dg 123456789</code>
             `;
             ctx.replyWithHTML(errorMessage);
             return;
@@ -248,6 +347,26 @@ ${statusEmoji} <b>STATUS TRANSAKSI</b>
                     status: data.status,
                     sn: data.sn,
                 }, { new: true });
+                
+                // Create transaction log in new format
+                if (data.status === 'Sukses' || data.status === 'Gagal') {
+                    // Get username from context
+                    const username = ctx.message.from.username || ctx.message.from.id.toString();
+                    // Create log with transaction data
+                    await createTransactionLog({
+                        ref_id: refIdNumber,
+                        customer_no: data.customer_no,
+                        buyer_sku_code: data.buyer_sku_code,
+                        message: data.message,
+                        status: data.status,
+                        rc: data.rc,
+                        sn: data.sn,
+                        buyer_last_saldo: data.buyer_last_saldo,
+                        price: data.price,
+                        tele: data.tele,
+                        wa: data.wa
+                    }, username, "bot");
+                }
             }
 
         } catch (error) {
@@ -273,20 +392,22 @@ ${statusEmoji} <b>STATUS TRANSAKSI</b>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📝 <b>Format yang benar:</b>
-<code>/digicheck [ref_id]</code>
+<code>/dg [ref_id]</code>
 
 💡 <b>Contoh:</b>
-<code>/digicheck 123456789</code>
+<code>/dg 123456789</code>
                 `;
                 ctx.replyWithHTML(errorMessage);
             }
         }
-    } else {
-        next();
+        return;
     }
+    return next();
 }
 
 module.exports = {
     getAllDigiflazz,
-    checkDigiflazz
+    checkDigiflazz,
+    // Export raw status checker for reuse (e.g., /struk)
+    checkTransactionStatus,
 }
