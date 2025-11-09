@@ -4,6 +4,22 @@ const TransactionLog = require("../models/transactionLog");
 const axios = require('axios');
 const crypto = require('crypto');
 
+const TELEGRAM_SOURCE = 'telegram_bot';
+
+function normalizeStatus(rawStatus) {
+    const status = (rawStatus || '').toString().toLowerCase();
+    if (status === 'sukses') return 'Sukses';
+    if (status === 'pending') return 'Pending';
+    if (status === 'gagal' || status === 'failed') return 'Gagal';
+    if (!status) return 'Pending';
+    return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function toNumeric(value, fallback = 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 async function checkTransactionStatus(RefID) {
     const username = process.env.username;
     const kunci = process.env.apikey;
@@ -97,9 +113,10 @@ async function checkTransactionStatus(RefID) {
 }
 
 // Function to upsert transaction log into unified transactions_log
-async function createTransactionLog(transactionData, user, source = "bot") {
+async function createTransactionLog(transactionData, user, source = TELEGRAM_SOURCE) {
     try {
         const timestamp = new Date();
+        const timestampIso = timestamp.toISOString();
         const {
             ref_id,
             customer_no,
@@ -108,10 +125,7 @@ async function createTransactionLog(transactionData, user, source = "bot") {
             status,
             rc,
             sn,
-            buyer_last_saldo,
             price,
-            tele,
-            wa,
             product_name,
             category,
             brand,
@@ -119,32 +133,49 @@ async function createTransactionLog(transactionData, user, source = "bot") {
         } = transactionData;
 
         const existing = await TransactionLog.findOne({ id: ref_id }).lean().exec();
+        const normalizedStatus = normalizeStatus(status);
+        const parsedCost = toNumeric(cost_price !== undefined ? cost_price : price);
+        const parsedSellingPrice = existing?.sellingPrice ?? toNumeric(price);
+        const productName = product_name || existing?.productName || 'Unknown Product';
+        const originalCustomer = customer_no || existing?.originalCustomerNo || '-';
+        let details = originalCustomer;
+        if (existing?.details && existing.details.startsWith(originalCustomer)) {
+            const suffix = existing.details.slice(originalCustomer.length).trim();
+            if (suffix && !/transaksi/i.test(suffix)) {
+                details = existing.details;
+            }
+        }
+        const categoryValue = category || existing?.productCategoryFromProvider || 'Digital Service';
+        const brandValue = brand || existing?.productBrandFromProvider || productName;
+        const actor = user || existing?.transactedBy || 'telegram_user';
+        const detailMessage = message ? message.toString() : '-';
+        const skuCode = buyer_sku_code || existing?.buyerSkuCode || productName;
 
         const logData = {
             id: ref_id,
-            productName: product_name || existing?.productName || "Unknown Product",
-            details: `${customer_no || existing?.originalCustomerNo || '-'} (${message})`,
-            costPrice: cost_price || existing?.costPrice || 0,
-            sellingPrice: typeof price === 'number' ? price : (existing?.sellingPrice || 0),
-            status: status,
-            timestamp: timestamp,
-            buyerSkuCode: buyer_sku_code || existing?.buyerSkuCode,
-            originalCustomerNo: customer_no || existing?.originalCustomerNo,
-            productCategoryFromProvider: category || existing?.productCategoryFromProvider || "Unknown Category",
-            productBrandFromProvider: brand || existing?.productBrandFromProvider || "Unknown Brand",
-            provider: "digiflazz",
-            transactedBy: user,
-            source: source,
-            categoryKey: category || existing?.categoryKey || "Unknown Category",
-            iconName: brand || existing?.iconName || "Unknown Brand",
+            productName,
+            details,
+            costPrice: parsedCost,
+            sellingPrice: parsedSellingPrice,
+            status: normalizedStatus,
+            timestamp: timestampIso,
+            buyerSkuCode: skuCode,
+            originalCustomerNo: originalCustomer,
+            productCategoryFromProvider: categoryValue,
+            productBrandFromProvider: brandValue,
+            provider: 'digiflazz',
+            transactedBy: actor,
+            source,
+            categoryKey: existing?.categoryKey || categoryValue || 'Default',
+            iconName: existing?.iconName || brandValue || 'Default',
             providerTransactionId: rc || existing?.providerTransactionId || null,
             transactionYear: timestamp.getFullYear(),
             transactionMonth: timestamp.getMonth() + 1,
             transactionDayOfMonth: timestamp.getDate(),
             transactionDayOfWeek: timestamp.getDay(),
             transactionHour: timestamp.getHours(),
-            failureReason: status === "Gagal" ? message : null,
-            serialNumber: sn || existing?.serialNumber || null
+            failureReason: normalizedStatus === 'Gagal' ? detailMessage : null,
+            serialNumber: sn ? sn.toString() : existing?.serialNumber || null
         };
 
         const updated = await TransactionLog.findOneAndUpdate(
@@ -365,7 +396,7 @@ ${statusEmoji} <b>STATUS TRANSAKSI</b>
                         price: data.price,
                         tele: data.tele,
                         wa: data.wa
-                    }, username, "bot");
+                    }, username, TELEGRAM_SOURCE);
                 }
             }
 

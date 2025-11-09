@@ -20,6 +20,8 @@ const mongoose = require('mongoose');
 const { checkStatus, GetAll, checkTovStatus } = require('./middleware/CheckTOV');
 const { getAllDigiflazz, checkDigiflazz, checkTransactionStatus: checkDigiStatus } = require('./middleware/Digiflazz');
 const { createReceiptImage } = require('./services/receipt');
+const { inquireFFNickname } = require('./services/ffNickname');
+const { inquireMobileLegendsNickname } = require('./services/mlNickname');
 const DigiFlazz = require('./models/trxdigi');
 const TokoV = require('./models/tov');
 const TransactionLog = require('./models/transactionLog');
@@ -83,6 +85,8 @@ bot.use(async (ctx, next) => {
 <b>Utilitas</b>
 • /pln <i>&lt;no_pelanggan&gt;</i> — validasi nama/ID PLN
 • /op <i>&lt;nomor_hp&gt;</i> — deteksi operator seluler
+• /ff <i>&lt;user_id&gt;</i> — cek nickname Free Fire
+• /ml <i>&lt;user_id&gt;</i> <i>&lt;server_id&gt;</i> — cek nickname Mobile Legends
 • /transactions — 10 log transaksi terakhir
 
 <i>Beberapa fitur hanya untuk pengguna yang di-whitelist.</i>`;
@@ -166,11 +170,89 @@ const checkPln = async (ctx, next) => {
     }
 };
 
+const checkFF = async (ctx, next) => {
+    const text = ctx.message?.text;
+    if (typeof text === 'string' && text.startsWith('/ff ')) {
+        const userId = text.slice(4).trim();
+        if (!userId) {
+            return ctx.reply('❓ *Mohon masukkan User ID setelah perintah /ff*\n\nContoh: /ff 123456789', { parse_mode: 'Markdown' });
+        }
+        try {
+            await ctx.reply('🔍 Mencari nickname Free Fire...');
+            const result = await inquireFFNickname(userId);
+            
+            if (result.isSuccess && result.nickname) {
+                const message = `✅ *Nickname Free Fire Ditemukan*\n\n` +
+                    `*User ID*: ${userId}\n` +
+                    `*Nickname*: ${result.nickname}\n\n` +
+                    `_${result.message}_`;
+                ctx.reply(message, { parse_mode: 'Markdown' });
+            } else {
+                const message = `❌ *Nickname Tidak Ditemukan*\n\n` +
+                    `*User ID*: ${userId}\n` +
+                    `*Pesan*: ${result.message || 'User ID tidak valid'}\n\n` +
+                    `_Periksa kembali User ID Anda._`;
+                ctx.reply(message, { parse_mode: 'Markdown' });
+            }
+        } catch (error) {
+            ctx.reply('⚠️ Terjadi kesalahan saat mengambil data. Silakan coba lagi nanti.');
+            console.error('Error checking FF nickname:', error.message);
+        }
+    } else if (text === '/ff') {
+        ctx.reply('❓ *Mohon masukkan User ID setelah perintah /ff*\n\nContoh: /ff 123456789', { parse_mode: 'Markdown' });
+    } else {
+        next();
+    }
+};
+
+const checkML = async (ctx, next) => {
+    const text = ctx.message?.text;
+    if (typeof text === 'string' && text.startsWith('/ml ')) {
+        const args = text.slice(4).trim().split(/\s+/);
+        if (args.length < 2) {
+            return ctx.reply('❓ *Mohon masukkan User ID dan Server ID*\n\nContoh: /ml 123456789 1234', { parse_mode: 'Markdown' });
+        }
+        const [userId, zoneId] = args;
+        try {
+            await ctx.reply('🔍 Mencari nickname Mobile Legends...');
+            const result = await inquireMobileLegendsNickname(userId, zoneId);
+            
+            if (result.isSuccess && result.nickname) {
+                let message = `✅ *Nickname Mobile Legends Ditemukan*\n\n` +
+                    `*User ID*: ${userId}\n` +
+                    `*Server ID*: ${zoneId}\n` +
+                    `*Nickname*: ${result.nickname}\n`;
+                if (result.country) {
+                    message += `*Region*: ${result.country}\n`;
+                }
+                message += `\n_${result.message}_`;
+                ctx.reply(message, { parse_mode: 'Markdown' });
+            } else {
+                const message = `❌ *Nickname Tidak Ditemukan*\n\n` +
+                    `*User ID*: ${userId}\n` +
+                    `*Server ID*: ${zoneId}\n` +
+                    `*Pesan*: ${result.message || 'User ID atau Server ID tidak valid'}\n\n` +
+                    `_Periksa kembali User ID dan Server ID Anda._`;
+                ctx.reply(message, { parse_mode: 'Markdown' });
+            }
+        } catch (error) {
+            ctx.reply('⚠️ Terjadi kesalahan saat mengambil data. Silakan coba lagi nanti.');
+            console.error('Error checking ML nickname:', error.message);
+        }
+    } else if (text === '/ml') {
+        ctx.reply('❓ *Mohon masukkan User ID dan Server ID*\n\nContoh: /ml 123456789 1234', { parse_mode: 'Markdown' });
+    } else {
+        next();
+    }
+}
+
 bot.use(checkStatus);
 bot.use(checkDigiflazz);
 bot.use(GetAll);
 bot.use(getAllDigiflazz);
 bot.use(checkPln);
+bot.use(checkFF);
+bot.use(checkML);
 bot.use(checkOperator);
 
 

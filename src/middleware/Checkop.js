@@ -190,3 +190,4 @@ const checkOp = (ctx, next) => {
 }
 
 module.exports = checkOp;
+module.exports.checkOperator = checkOperator;

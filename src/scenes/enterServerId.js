@@ -5,6 +5,9 @@ const { buildPinKeyboard, promptText } = require('../services/pinpad');
 const { Markup } = require('telegraf');
 const { createTrx, getRefId, numberWithCommas } = require('../services/http_toko');
 const { inquireFFNickname } = require('../services/ffNickname');
+const checkOpMiddleware = require('../middleware/Checkop');
+const detectOperator = checkOpMiddleware?.checkOperator;
+const { inquireMobileLegendsNickname } = require('../services/mlNickname');
 const TokoV = require('../models/tov');
 const TransactionLog = require('../models/transactionLog');
 
@@ -24,11 +27,31 @@ const formatCurrency = (amount) => {
     return numberWithCommas(numeric);
 };
 
+const TELEGRAM_SOURCE = 'telegram_bot';
+const OPERATOR_CATEGORY_IDS = new Set(['4', '5', '18']);
+
+const normalizeStatus = (rawStatus) => {
+    const status = (rawStatus || '').toString().toLowerCase();
+    if (status === 'sukses') return 'Sukses';
+    if (status === 'pending') return 'Pending';
+    if (status === 'gagal' || status === 'failed') return 'Gagal';
+    return status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Pending';
+};
+
+const toNumeric = (value, fallback = 0) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const buildTimestamp = () => {
+    const now = new Date();
+    return { date: now, iso: now.toISOString() };
+};
+
 // Function to create transaction log in new format
-async function createTransactionLog(transactionData, user, source = "bot", ctx = null) {
+async function createTransactionLog(transactionData, user, source = TELEGRAM_SOURCE, ctx = null) {
     try {
-        // Parse timestamp
-        const timestamp = new Date();
+        const { date: timestamp, iso: timestampIso } = buildTimestamp();
         
         // Extract data from transaction
         const {
@@ -42,39 +65,68 @@ async function createTransactionLog(transactionData, user, source = "bot", ctx =
             price
         } = transactionData;
         
-        // Create transaction log in new format
+        const existing = await TransactionLog.findOne({ id: ref_id }).lean().exec();
+        const normalizedStatus = normalizeStatus(status);
+        const parsedPrice = toNumeric(price);
+        const productName = produk || existing?.productName || "Unknown Product";
+        const categoryName = (ctx?.session?.selectedCategory?.nama) || existing?.productCategoryFromProvider || "Unknown Category";
+        const brandName = (ctx?.session?.selectedBrand?.nama) || existing?.productBrandFromProvider || productName;
+        const customerTarget = (ctx?.session?.nomorTujuan && ctx.session.nomorTujuan.trim()) || existing?.originalCustomerNo || ref_id;
+        const infoParts = [];
+
+        const operatorInfo = ctx?.session?.operatorInfo;
+        if (operatorInfo?.operator) {
+            const operatorName = operatorInfo.operator.toString().toUpperCase();
+            infoParts.push(operatorName);
+        }
+
+        if (ctx?.session?.ffNickname) {
+            infoParts.push(`FF: ${ctx.session.ffNickname}`);
+        }
+
+        if (ctx?.session?.mlNickname) {
+            const country = ctx?.session?.mlCountry ? ` (${ctx.session.mlCountry})` : '';
+            infoParts.push(`ML: ${ctx.session.mlNickname}${country}`);
+        }
+
+        const combinedDetails = infoParts.length > 0
+            ? `${customerTarget} (${infoParts.join(' | ')})`
+            : customerTarget;
+
         const logData = {
             id: ref_id,
-            productName: produk || "Unknown Product",
-            details: `${ref_id} (${message})`,
-            costPrice: price || 0, // TOV doesn't provide cost price, using selling price
-            sellingPrice: price || 0,
-            status: status,
-            timestamp: timestamp,
-            buyerSkuCode: produk || "Unknown Product",
-            originalCustomerNo: ref_id,
-            productCategoryFromProvider: (ctx?.session?.selectedCategory?.nama) || "Unknown Category",
-            productBrandFromProvider: (ctx?.session?.selectedBrand?.nama) || "Unknown Brand",
+            productName,
+            details: combinedDetails,
+            costPrice: parsedPrice,
+            sellingPrice: existing?.sellingPrice ?? parsedPrice,
+            status: normalizedStatus,
+            timestamp: timestampIso,
+            buyerSkuCode: produk || existing?.buyerSkuCode || productName,
+            originalCustomerNo: customerTarget,
+            productCategoryFromProvider: categoryName,
+            productBrandFromProvider: brandName,
             provider: "tokovoucher",
-            transactedBy: user,
-            source: source,
-            categoryKey: (ctx?.session?.selectedCategory?.nama) || "Unknown Category",
-            iconName: (ctx?.session?.selectedBrand?.nama) || "Unknown Brand",
-            providerTransactionId: trx_id,
+            transactedBy: user || existing?.transactedBy || 'telegram_user',
+            source: source || existing?.source || TELEGRAM_SOURCE,
+            categoryKey: existing?.categoryKey || categoryName,
+            iconName: existing?.iconName || brandName,
+            providerTransactionId: trx_id || existing?.providerTransactionId || null,
             transactionYear: timestamp.getFullYear(),
             transactionMonth: timestamp.getMonth() + 1,
             transactionDayOfMonth: timestamp.getDate(),
             transactionDayOfWeek: timestamp.getDay(),
             transactionHour: timestamp.getHours(),
-            failureReason: status === "gagal" ? message : null,
-            serialNumber: sn || null
+            failureReason: normalizedStatus === "Gagal" ? (message || null) : null,
+            serialNumber: sn ? sn.toString() : existing?.serialNumber || null
         };
         
-        // Save to new transaction log collection
-        const transactionLog = new TransactionLog(logData);
-        await transactionLog.save();
+        const updated = await TransactionLog.findOneAndUpdate(
+            { id: ref_id },
+            { $set: logData },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
         
-        return transactionLog;
+        return updated;
     } catch (error) {
         console.error("Error creating transaction log:", error);
         // Don't throw error to avoid breaking main flow
@@ -118,12 +170,46 @@ botMenu.on('text', async (ctx) => {
             // Clean, mobile-friendly confirmation + optional Free Fire nickname validation
             const produk = ctx.session.selectedProduct || {};
             const harga = produk.price || 0;
+            const selectedCategory = ctx.session.selectedCategory;
+            const requiresOperatorInfo = OPERATOR_CATEGORY_IDS.has(String(selectedCategory?.id || ''));
+
+            let normalizedDestination = (ctx.session.nomorTujuan || '').trim();
+            let operatorResult = null;
+
+            if (requiresOperatorInfo && typeof detectOperator === 'function') {
+                try {
+                    const detected = detectOperator(normalizedDestination);
+                    if (detected?.phoneNumber) {
+                        normalizedDestination = detected.phoneNumber;
+                        ctx.session.nomorTujuan = normalizedDestination;
+                    }
+                    if (detected?.success) {
+                        operatorResult = detected;
+                    }
+                } catch (error) {
+                    console.warn('Operator detection failed:', error);
+                }
+            }
+
+            ctx.session.operatorInfo = operatorResult;
+            ctx.session.requiresOperatorInfo = requiresOperatorInfo;
+            if (!requiresOperatorInfo) {
+                ctx.session.operatorInfo = null;
+            }
+
             let detail = `✅ <b>KONFIRMASI PESANAN</b>\n\n`;
             detail += `📦 <b>Produk:</b> ${produk.nama_produk || '-'}\n`;
             detail += `💰 <b>Harga:</b> Rp ${numberWithCommas(Number(harga))}\n`;
-            detail += `👤 <b>Tujuan:</b> <code>${ctx.session.nomorTujuan}</code>\n`;
+            detail += `👤 <b>Tujuan:</b> <code>${escapeHtml(normalizedDestination)}</code>\n`;
+            if (operatorResult) {
+                const operatorLabel = operatorResult.operator ? operatorResult.operator.toString().toUpperCase() : '';
+                detail += `🏢 <b>Operator:</b> ${operatorResult.emoji} <b>${escapeHtml(operatorLabel)}</b> ${operatorResult.icon}\n`;
+                detail += `🔢 <b>Prefix:</b> <code>${escapeHtml(operatorResult.prefix)}</code>\n`;
+            } else if (requiresOperatorInfo) {
+                detail += `⚠️ <b>Operator:</b> Tidak terdeteksi. Periksa kembali nomor tujuan.\n`;
+            }
             if (ctx.session.serverId) {
-                detail += `🎮 <b>Server ID:</b> <code>${ctx.session.serverId}</code>\n`;
+                detail += `🎮 <b>Server ID:</b> <code>${escapeHtml(ctx.session.serverId)}</code>\n`;
             }
             if (!ctx.session.refId) {
                 try { ctx.session.refId = await getRefId(); } catch (e) { ctx.session.refId = null; }
@@ -132,8 +218,13 @@ botMenu.on('text', async (ctx) => {
                 detail += `🆔 <b>Ref ID:</b> <code>${ctx.session.refId}</code>\n`;
             }
 
-            // Free Fire nickname verification (based on product name)
+            // Nickname verifications based on product name / operator
             const name = (produk.nama_produk || '').toString().toLowerCase();
+            const operatorId = ctx?.session?.selectedBrand?.id?.toString();
+            const isMobileLegendsOperator = operatorId === '2';
+            ctx.session.ffNickname = null;
+            ctx.session.mlNickname = null;
+
             if (name.includes('free fire')) {
                 try {
                     const res = await inquireFFNickname(ctx.session.nomorTujuan);
@@ -153,6 +244,35 @@ botMenu.on('text', async (ctx) => {
                     detail += `• Status: <i>Gangguan</i>\n`;
                     detail += `• Pesan: <i>${e.message}</i>\n`;
                     detail += `• Transaksi dapat dilanjutkan\n`;
+                }
+            } else if (isMobileLegendsOperator || name.includes('mobile legends')) {
+                if (!ctx.session.serverId) {
+                    detail += `\n⚠️ <b>Verifikasi Mobile Legends</b>\n`;
+                    detail += `• Status: <i>Lewati</i> (Zone ID tidak diisi)\n`;
+                } else {
+                    try {
+                        const res = await inquireMobileLegendsNickname(ctx.session.nomorTujuan, ctx.session.serverId);
+                        if (res?.isSuccess && res?.nickname) {
+                            ctx.session.mlNickname = res.nickname;
+                            ctx.session.mlCountry = res.country;
+                            detail += `\n🕹️ <b>Verifikasi Mobile Legends</b>\n`;
+                            detail += `• Nickname: <b>${escapeHtml(res.nickname)}</b>\n`;
+                            if (res?.country) {
+                                detail += `• Country: <b>${escapeHtml(res.country)}</b>\n`;
+                            }
+                        } else {
+                            detail += `\n⚠️ <b>Verifikasi Mobile Legends</b>\n`;
+                            detail += `• Status: <i>${escapeHtml(res?.message || 'Tidak tervalidasi')}</i>\n`;
+                            detail += `• Transaksi dapat dilanjutkan\n`;
+                            ctx.session.mlCountry = undefined;
+                        }
+                    } catch (e) {
+                        detail += `\n⚠️ <b>Verifikasi Mobile Legends</b>\n`;
+                        detail += `• Status: <i>Gangguan</i>\n`;
+                        detail += `• Pesan: <i>${escapeHtml(e.message || 'Tidak diketahui')}</i>\n`;
+                        detail += `• Transaksi dapat dilanjutkan\n`;
+                        ctx.session.mlCountry = undefined;
+                    }
                 }
             }
 
@@ -174,7 +294,7 @@ botMenu.on('text', async (ctx) => {
                 const trx_id = await createTrx(ref_id, codeList, NomorTujuan, server_id);
 
                 const username = ctx.message.from.username || ctx.message.from.id.toString();
-                await createTransactionLog(trx_id, username, "bot", ctx);
+                await createTransactionLog(trx_id, username, TELEGRAM_SOURCE, ctx);
 
                 let statusEmoji;
                 let statusText;
@@ -208,6 +328,23 @@ botMenu.on('text', async (ctx) => {
                 summaryLines.push(`📱 <b>Tujuan:</b> <code>${escapeHtml(ctx.session.nomorTujuan || '-')}</code>`);
                 if (hasValue(server_id)) {
                     summaryLines.push(`🎮 <b>Server:</b> <code>${escapeHtml(server_id)}</code>`);
+                }
+                if (ctx.session.ffNickname) {
+                    summaryLines.push(`🕹️ <b>Nickname FF:</b> <code>${escapeHtml(ctx.session.ffNickname)}</code>`);
+                }
+                if (ctx.session.mlNickname) {
+                    summaryLines.push(`🕹️ <b>Nickname ML:</b> <code>${escapeHtml(ctx.session.mlNickname)}</code>`);
+                    if (ctx.session.mlCountry) {
+                        summaryLines.push(`🌍 <b>Country:</b> <code>${escapeHtml(ctx.session.mlCountry)}</code>`);
+                    }
+                }
+                const operatorInfo = ctx.session.operatorInfo;
+                if (operatorInfo) {
+                const operatorLabel = operatorInfo.operator ? operatorInfo.operator.toString().toUpperCase() : '';
+                summaryLines.push(`🏢 <b>Operator:</b> ${operatorInfo.emoji} <b>${escapeHtml(operatorLabel)}</b> ${operatorInfo.icon}`);
+                    summaryLines.push(`🔢 <b>Prefix:</b> <code>${escapeHtml(operatorInfo.prefix)}</code>`);
+                } else if (ctx.session.requiresOperatorInfo) {
+                    summaryLines.push(`⚠️ <b>Operator:</b> Tidak terdeteksi`);
                 }
                 summaryLines.push(`💰 <b>Harga:</b> Rp ${formatCurrency(trx_id.price)}`);
                 if (hasValue(trx_id.sisa_saldo)) {

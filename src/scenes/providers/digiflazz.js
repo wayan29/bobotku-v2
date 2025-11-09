@@ -38,8 +38,9 @@ const buildTransactionSummary = (proses, ctx, statusEmoji, statusText) => {
     lines.push(`📱 <b>Nomor:</b> <code>${escapeHtml(proses.customer_no || ctx.session.customerNo || '-')}</code>`);
     if (hasValue(ctx.session.operatorInfo?.name)) {
         const operator = ctx.session.operatorInfo;
+        const operatorLabel = operator.name ? operator.name.toString().toUpperCase() : '';
         const prefixText = hasValue(operator.prefix) ? ` (prefix ${escapeHtml(operator.prefix)})` : '';
-        lines.push(`📡 <b>Operator:</b> ${operator.emoji || ''} <b>${escapeHtml(operator.name)}</b>${prefixText}`.trim());
+        lines.push(`📡 <b>Operator:</b> ${operator.emoji || ''} <b>${escapeHtml(operatorLabel)}</b>${prefixText}`.trim());
     }
     lines.push(`🏷️ <b>SKU:</b> <code>${escapeHtml(proses.buyer_sku_code || ctx.session.sku || '-')}</code>`);
     lines.push(`💰 <b>Harga:</b> Rp ${formatCurrency(proses.price || ctx.session.selectedProduct?.price)}`);
@@ -157,7 +158,7 @@ const handleDigiflazzEnter = async (ctx, selectedProduct) => {
 };
 
 // Function to create transaction log in new format
-async function createTransactionLog(transactionData, user, source = "bot", productData = {}) {
+async function createTransactionLog(transactionData, user, source = "telegram_bot", productData = {}, context = {}) {
     try {
         // Parse timestamp
         const timestamp = new Date();
@@ -177,17 +178,41 @@ async function createTransactionLog(transactionData, user, source = "bot", produ
             wa
         } = transactionData;
         
+        const baseCustomer = context?.customerNo || customer_no || '-';
+        const infoParts = [];
+
+        if (context?.operatorInfo?.name) {
+            infoParts.push(context.operatorInfo.name.toString().toUpperCase());
+        }
+
+        if (context?.ffNickname) {
+            infoParts.push(`FF: ${context.ffNickname}`);
+        }
+
+        if (context?.mlNickname) {
+            const country = context?.mlCountry ? ` (${context.mlCountry})` : '';
+            infoParts.push(`ML: ${context.mlNickname}${country}`);
+        }
+
+        if (context?.plnVerification?.name) {
+            infoParts.push(`PLN: ${context.plnVerification.name}`);
+        }
+
+        const details = infoParts.length > 0
+            ? `${baseCustomer} (${infoParts.join(' | ')})`
+            : baseCustomer;
+
         // Create transaction log in new format
         const logData = {
             id: ref_id,
             productName: productData.product_name || "Unknown Product",
-            details: `${customer_no} (${message})`,
+            details,
             costPrice: productData.price || 0,
             sellingPrice: price || 0,
             status: status,
             timestamp: timestamp,
             buyerSkuCode: buyer_sku_code,
-            originalCustomerNo: customer_no,
+            originalCustomerNo: baseCustomer,
             productCategoryFromProvider: productData.category || "Unknown Category",
             productBrandFromProvider: productData.brand || "Unknown Brand",
             provider: "digiflazz",
@@ -206,8 +231,11 @@ async function createTransactionLog(transactionData, user, source = "bot", produ
         };
         
         // Save to new transaction log collection
-        const transactionLog = new TransactionLog(logData);
-        await transactionLog.save();
+        const transactionLog = await TransactionLog.findOneAndUpdate(
+            { id: ref_id },
+            { $set: logData },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
         
         return transactionLog;
     } catch (error) {
@@ -312,8 +340,9 @@ const handleDigiflazzMessage = async (ctx, message) => {
         confirmText += `👤 <b>Pelanggan:</b> <code>${escapeHtml(ctx.session.customerNo)}</code>\n`;
         if (hasValue(ctx.session.operatorInfo?.name)) {
             const operator = ctx.session.operatorInfo;
+            const operatorLabel = operator.name ? operator.name.toString().toUpperCase() : '';
             const prefixText = hasValue(operator.prefix) ? ` (prefix ${escapeHtml(operator.prefix)})` : '';
-            confirmText += `📡 <b>Operator:</b> ${operator.emoji || ''} <b>${escapeHtml(operator.name)}</b>${prefixText}\n`;
+            confirmText += `📡 <b>Operator:</b> ${operator.emoji || ''} <b>${escapeHtml(operatorLabel)}</b>${prefixText}\n`;
         }
         if (verifyBlock) confirmText += `\n${verifyBlock}`;
         confirmText += `\n🆔 <b>Ref ID:</b> <code>${ctx.session.refId}</code>\n\n`;
@@ -349,7 +378,7 @@ const handleDigiflazzMessage = async (ctx, message) => {
             const text = buildTransactionSummary(proses, ctx, statusEmoji, statusText);
 
             const username = ctx.message.from.username || ctx.message.from.id.toString();
-            await createTransactionLog(proses, username, "bot", ctx.session.selectedProduct);
+            await createTransactionLog(proses, username, "telegram_bot", ctx.session.selectedProduct, ctx.session);
 
             await ctx.replyWithHTML(text);
             ctx.session = {};
@@ -454,7 +483,7 @@ module.exports = {
             const text = buildTransactionSummary(proses, ctx, statusEmoji, statusText);
 
             const username = ctx.callbackQuery.from.username || ctx.callbackQuery.from.id.toString();
-            await createTransactionLog(proses, username, "bot", ctx.session.selectedProduct);
+            await createTransactionLog(proses, username, "telegram_bot", ctx.session.selectedProduct, ctx.session);
 
             await ctx.replyWithHTML(text);
             ctx.session = {};

@@ -7,6 +7,22 @@ const TokoV = require('../models/tov');
 const TransactionLog = require('../models/transactionLog');
 const { numberWithCommas } = require('../services/http_toko');
 
+const TELEGRAM_SOURCE = 'telegram_bot';
+
+function normalizeStatus(rawStatus) {
+    const status = (rawStatus || '').toString().toLowerCase();
+    if (status === 'sukses') return 'Sukses';
+    if (status === 'pending') return 'Pending';
+    if (status === 'gagal' || status === 'failed') return 'Gagal';
+    if (!status) return 'Pending';
+    return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function toNumeric(value, fallback = 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 if (!envConfig) {
     throw new Error(`Failed to load .env file from ${dotenvPath}`);
 }
@@ -27,12 +43,11 @@ if (missingEnvVars.length > 0) {
 }
 
 // Function to create transaction log (upsert to avoid duplicates)
-async function createTransactionLog(transactionData, user, source = "bot") {
+async function createTransactionLog(transactionData, user, source = TELEGRAM_SOURCE) {
     try {
-        // Parse timestamp
         const timestamp = new Date();
-        
-        // Extract data from transaction
+        const timestampIso = timestamp.toISOString();
+
         const {
             status,
             message,
@@ -40,39 +55,48 @@ async function createTransactionLog(transactionData, user, source = "bot") {
             ref_id,
             trx_id,
             produk,
-            sisa_saldo,
             price
         } = transactionData;
-        
-        // Load existing (to preserve category/brand fields)
-        const existing = await TransactionLog.findOne({ id: ref_id }).lean().exec();
 
-        // Create transaction log in new format
+        const existing = await TransactionLog.findOne({ id: ref_id }).lean().exec();
+        const normalizedStatus = normalizeStatus(status);
+        const parsedPrice = toNumeric(price);
+        const productName = produk || existing?.productName || 'Unknown Product';
+        const actor = user || existing?.transactedBy || 'telegram_user';
+        const customerTarget = existing?.originalCustomerNo || ref_id;
+        let details = customerTarget;
+        if (existing?.details && existing.details.startsWith(customerTarget)) {
+            const suffix = existing.details.slice(customerTarget.length).trim();
+            if (suffix && !/transaksi/i.test(suffix)) {
+                details = existing.details;
+            }
+        }
+
         const logData = {
             id: ref_id,
-            productName: produk || "Unknown Product",
-            details: `${ref_id} (${message})`,
-            costPrice: price || 0, // TOV doesn't provide cost price, using selling price
-            sellingPrice: price || 0,
-            status: status,
-            timestamp: timestamp,
-            buyerSkuCode: produk || "Unknown Product",
-            originalCustomerNo: ref_id,
-            productCategoryFromProvider: existing?.productCategoryFromProvider || "Unknown Category",
-            productBrandFromProvider: existing?.productBrandFromProvider || "Unknown Brand",
-            provider: "tokovoucher",
-            transactedBy: user,
-            source: source,
-            categoryKey: existing?.categoryKey || "Unknown Category",
-            iconName: existing?.iconName || "Unknown Brand",
-            providerTransactionId: trx_id,
+            productName,
+            details,
+            costPrice: parsedPrice,
+            sellingPrice: existing?.sellingPrice ?? parsedPrice,
+            status: normalizedStatus,
+            timestamp: timestampIso,
+            buyerSkuCode: produk || existing?.buyerSkuCode || productName,
+            originalCustomerNo: customerTarget,
+            productCategoryFromProvider: existing?.productCategoryFromProvider || 'TokoVoucher',
+            productBrandFromProvider: existing?.productBrandFromProvider || productName,
+            provider: 'tokovoucher',
+            transactedBy: actor,
+            source: source || existing?.source || TELEGRAM_SOURCE,
+            categoryKey: existing?.categoryKey || 'Default',
+            iconName: existing?.iconName || 'Default',
+            providerTransactionId: trx_id || existing?.providerTransactionId || null,
             transactionYear: timestamp.getFullYear(),
             transactionMonth: timestamp.getMonth() + 1,
             transactionDayOfMonth: timestamp.getDate(),
             transactionDayOfWeek: timestamp.getDay(),
             transactionHour: timestamp.getHours(),
-            failureReason: status === "Gagal" ? message : null,
-            serialNumber: sn || null
+            failureReason: normalizedStatus === 'Gagal' ? (message || null) : null,
+            serialNumber: sn ? sn.toString() : existing?.serialNumber || null
         };
         
         // Upsert into transaction log collection to prevent duplicate key errors
@@ -258,7 +282,7 @@ ${data.sn ? `🎮 Serial Number:\n<code>${data.sn}</code>\n\n` : ''}${data.messa
             
             // Create transaction log in new format for all status updates
         const username = ctx.message.from.username || ctx.message.from.id.toString();
-        await createTransactionLog(data, username, "bot");
+        await createTransactionLog(data, username, TELEGRAM_SOURCE);
         }
     } catch (error) {
         const now = new Date();

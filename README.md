@@ -153,6 +153,10 @@ Catatan akses pengguna:
 3) Commit singkat dan jelas
 4) PR dengan deskripsi perubahan
 
+## 🐍 Versi Python
+
+Repositori ini juga menyediakan port Python di folder `python-version/`. Bot tersebut memakai `python-telegram-bot` dan menyediakan alur serta command setara dengan implementasi Node.js. Ikuti petunjuk pada `python-version/README.md` untuk setup dan menjalankan.
+
 ---
 
 Selamat bertransaksi dengan aman dan nyaman! 🎉
